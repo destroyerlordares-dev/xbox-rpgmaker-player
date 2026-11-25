@@ -109,3 +109,8 @@ jobs:
           name: phase1-build
           path: out/
           if-no-files-found: ignore
+upload-artifact@v4
+        with:
+          name: phase1-build
+          path: out/
+          if-no-files-found: ignore
