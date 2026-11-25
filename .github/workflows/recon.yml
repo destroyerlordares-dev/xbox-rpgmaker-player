@@ -1,0 +1,110 @@
+name: mkxp-z UWP recon
+
+# Step 1 of a mkxp-z -> Xbox Dev Mode (UWP) port, for playing RPG Maker XP
+# fan games such as Pokemon Infinite Fusion.
+# This does NOT build a port. It gathers facts: how mkxp-z builds on
+# Windows, what it depends on, and where its sources touch OpenGL, Ruby,
+# SDL and Win32 APIs that UWP restricts.
+# Run it from the Actions tab (workflow_dispatch), then download the
+# "recon" artifact and send report.txt back to Claude.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Clone mkxp-z
+        run: |
+          git clone --depth 1 https://github.com/mkxp-z/mkxp-z.git src
+          New-Item -ItemType Directory -Force recon | Out-Null
+          "mkxp-z commit: $(git -C src rev-parse HEAD)" | Out-File recon/report.txt
+          "Date: $(Get-Date -Format u)" | Out-File recon/report.txt -Append
+
+      - name: Try submodules (may fail, that is fine)
+        continue-on-error: true
+        run: |
+          git -C src submodule update --init --depth 1 2>&1 | Tee-Object recon/submodules.log
+
+      - name: Inventory build system and layout
+        run: |
+          "`n=== top level ===" | Out-File recon/report.txt -Append
+          Get-ChildItem src | Select-Object -ExpandProperty Name | Out-File recon/report.txt -Append
+
+          "`n=== build files ===" | Out-File recon/report.txt -Append
+          Get-ChildItem src -Recurse -Include meson.build,CMakeLists.txt,Makefile,*.sln,*.vcxproj,*.cmake,*.ini,*.cross `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\\.git\\' } |
+            ForEach-Object { $_.FullName.Replace((Resolve-Path src).Path, '') } | Out-File recon/report.txt -Append
+
+          "`n=== Windows / build lines in README ===" | Out-File recon/report.txt -Append
+          Get-ChildItem src -Filter README* | ForEach-Object {
+            Select-String -Path $_.FullName -Pattern 'windows|msys|mingw|meson|cmake|visual studio|angle|opengl|ruby|sdl' |
+              Select-Object -First 40 | ForEach-Object { $_.Line.Trim() }
+          } | Out-File recon/report.txt -Append
+
+      - name: List dependencies
+        run: |
+          "`n=== dependency() lines in meson.build files ===" | Out-File recon/report.txt -Append
+          Get-ChildItem src -Recurse -Filter meson.build -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\\.git\\' } |
+            Select-String -Pattern 'dependency\(|find_library\(|subproject\(' |
+            ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique | Out-File recon/report.txt -Append
+
+          "`n=== subprojects / vendored folders ===" | Out-File recon/report.txt -Append
+          foreach ($d in 'subprojects','windows','binding','src','shader','assets') {
+            if (Test-Path "src/$d") {
+              "-- $d" | Out-File recon/report.txt -Append
+              Get-ChildItem "src/$d" | Select-Object -First 60 -ExpandProperty Name | Out-File recon/report.txt -Append
+            }
+          }
+
+      - name: Scan sources for graphics, Ruby and Win32 usage
+        run: |
+          $patterns = @(
+            'GL_','glew|GLEW','glad','GLES','ANGLE|EGL',
+            'SDL_CreateWindow','SDL_GL','SDL_Init','SDL_GameController|SDL_Joystick',
+            'ruby_|rb_define|rb_funcall','mruby','AL_|alc[A-Z]','SDL_sound|Sound_',
+            'physfs|PHYSFS','pixman','TTF_|freetype','iconv','boost',
+            'CreateProcess','LoadLibrary','GetProcAddress','CreateFile[AW]?\(','VirtualAlloc',
+            'GetModuleHandle','WinMain|wWinMain','steam|discord'
+          )
+          $files = Get-ChildItem src -Recurse -Include *.cpp,*.h,*.c,*.hpp,*.cc,*.mm,*.rb,*.glsl,*.frag,*.vert -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\\.git\\' -and $_.FullName -notmatch '\\subprojects\\' }
+          "`n=== source files scanned: $($files.Count) ===" | Out-File recon/report.txt -Append
+          "`n=== usage (pattern: files / total hits) ===" | Out-File recon/report.txt -Append
+          foreach ($p in $patterns) {
+            $hits = $files | Select-String -Pattern $p -ErrorAction SilentlyContinue
+            $nf = ($hits | Select-Object -ExpandProperty Path -Unique | Measure-Object).Count
+            $nh = ($hits | Measure-Object).Count
+            "{0,-34} {1,4} files / {2,5} hits" -f $p, $nf, $nh | Out-File recon/report.txt -Append
+            $hits | Select-Object -First 25 | ForEach-Object {
+              "$($_.Path.Replace((Resolve-Path src).Path,'')):$($_.LineNumber): $($_.Line.Trim())"
+            } | Out-File "recon/hits_$($p -replace '[^A-Za-z0-9]','_').txt"
+          }
+
+      - name: Which GL features and Ruby version does it use
+        run: |
+          "`n=== GL version / extension hints ===" | Out-File recon/report.txt -Append
+          Get-ChildItem src -Recurse -Include *.cpp,*.h,*.txt,*.build,*.glsl -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\\.git\\' } |
+            Select-String -Pattern 'GL_ARB_|GL_EXT_|GL_VERSION|#version|SDL_GL_CONTEXT' |
+            Select-Object -First 60 | ForEach-Object { "$($_.Path.Replace((Resolve-Path src).Path,'')):$($_.LineNumber): $($_.Line.Trim())" } |
+            Out-File recon/report.txt -Append
+
+          "`n=== Ruby version hints ===" | Out-File recon/report.txt -Append
+          Get-ChildItem src -Recurse -Include *.build,*.txt,*.md,*.yml,*.cross -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\\.git\\' } |
+            Select-String -Pattern 'ruby[-_ ]?[0-9]\.[0-9]|ruby_version|RUBY_VERSION|ruby-3|ruby-2' |
+            Select-Object -First 30 | ForEach-Object { "$($_.Path.Replace((Resolve-Path src).Path,'')):$($_.LineNumber): $($_.Line.Trim())" } |
+            Out-File recon/report.txt -Append
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recon
+          path: recon/
