@@ -1,0 +1,116 @@
+name: Phase 1 - mkxp-z Windows build
+
+# Phase 1 of the mkxp-z -> Xbox (UWP) port.
+# Goal: prove that mkxp-z's normal desktop Windows build works on a
+# GitHub runner, using the recipe from mkxp-z's own wiki
+# (MSYS2 MinGW64: `make` in windows/ for the dependencies, then
+# `meson setup build` and `ninja`).
+# Nothing here targets UWP yet. A working baseline tells us the
+# toolchain and dependency versions are good before we start changing them.
+#
+# Run it from the Actions tab (workflow_dispatch). The dependency build
+# compiles Ruby, SDL2 and more from source, so it can take a long time.
+# Download the "phase1-logs" artifact (and "phase1-build" if it exists)
+# when it finishes, or check the run's Summary page.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Set up MSYS2 (MinGW64) and build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git ruby vim base-devel
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-autotools
+            mingw-w64-x86_64-gcc
+
+      - name: Clone mkxp-z
+        run: |
+          mkdir -p logs out
+          git clone --depth 1 https://github.com/mkxp-z/mkxp-z.git src
+          cd src
+          git submodule update --init --depth 1 || echo "submodule step skipped or failed"
+          git rev-parse HEAD | tee ../logs/commit.txt
+
+      - name: Build dependencies (make in windows/)
+        id: deps
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd src/windows
+          date | tee -a ../../logs/timing.txt
+          make 2>&1 | tee ../../logs/deps-build.log
+          date | tee -a ../../logs/timing.txt
+
+      - name: Build mkxp-z (meson + ninja)
+        id: main
+        if: steps.deps.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd src/windows
+          source vars.sh
+          cd ..
+          meson setup build 2>&1 | tee ../logs/meson-setup.log
+          cd build
+          ninja 2>&1 | tee ../../logs/ninja.log
+          cp "${MKXPZ_PREFIX}/bin/x64-msvcrt-ruby310.dll" . || echo "ruby dll copy failed"
+          cp /mingw64/bin/zlib1.dll . || echo "zlib dll copy failed"
+          strip mkxp-z.exe
+          cp mkxp-z.exe *.dll ../../out/ || true
+
+      - name: Record versions and disk use
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "== tool versions =="
+            gcc --version | head -1
+            meson --version
+            ruby --version
+            echo "== disk =="
+            df -h . | tail -2
+            echo "== out/ =="
+            ls -la out
+          } 2>&1 | tee logs/env.txt
+
+      - name: Write run summary
+        if: always()
+        shell: pwsh
+        run: |
+          "## Phase 1 result" | Out-File $env:GITHUB_STEP_SUMMARY
+          "- Dependencies build (make in windows/): ${{ steps.deps.outcome }}" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "- mkxp-z build (meson + ninja): ${{ steps.main.outcome }}" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "- Logs are in the phase1-logs artifact" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-logs
+          path: logs/
+
+      - name: Upload built files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-build
+          path: out/
+          if-no-files-found: ignore
+upload-artifact@v4
+        with:
+          name: phase1-build
+          path: out/
+          if-no-files-found: ignore
