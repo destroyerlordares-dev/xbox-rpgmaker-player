@@ -1,0 +1,113 @@
+name: Phase 1 - mkxp-z Windows build
+
+# Phase 1 of the mkxp-z -> Xbox (UWP) port.
+# Goal: prove that mkxp-z's normal desktop Windows build works on a
+# GitHub runner. Nothing here targets UWP yet.
+#
+# v2: the old wiki recipe (`make` in windows/) no longer applies, because the
+# windows/ folder has no Makefile any more. Current mkxp-z builds everything
+# (Ruby, SDL2, OpenAL and more) through meson "wrap" subprojects, so the
+# recipe is just `meson setup` then `meson compile`, inside MSYS2 MinGW64.
+#
+# Run it from the Actions tab (workflow_dispatch). The compile step builds
+# all the dependencies from source, so it can take a long time.
+# Download the "phase1-logs" artifact (and "phase1-build" if it exists)
+# when it finishes, or check the run's Summary page.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Set up MSYS2 (MinGW64) and build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git ruby vim base-devel patch
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-autotools
+            mingw-w64-x86_64-gcc
+
+      - name: Clone mkxp-z
+        run: |
+          mkdir -p logs out
+          git clone --depth 1 https://github.com/mkxp-z/mkxp-z.git src
+          cd src
+          git submodule update --init --depth 1 || echo "submodule step skipped or failed"
+          git rev-parse HEAD | tee ../logs/commit.txt
+
+      - name: Configure (meson setup, fetches subprojects)
+        id: setup
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd src
+          date | tee -a ../logs/timing.txt
+          meson setup build --buildtype=release -Dstrip=true 2>&1 | tee ../logs/meson-setup.log
+          date | tee -a ../logs/timing.txt
+
+      - name: Compile (builds all dependencies, then mkxp-z)
+        id: compile
+        if: steps.setup.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd src
+          meson compile -C build 2>&1 | tee ../logs/compile.log
+          date | tee -a ../logs/timing.txt
+
+      - name: Collect build output
+        if: always()
+        continue-on-error: true
+        run: |
+          cd src/build 2>/dev/null || exit 0
+          find . -maxdepth 2 \( -name '*.exe' -o -name '*.dll' \) -exec cp {} ../../out/ \; || true
+          ls -la ../../out | tee ../../logs/out-list.txt
+
+      - name: Record versions and disk use
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "== tool versions =="
+            gcc --version | head -1
+            meson --version
+            ninja --version
+            echo "== disk =="
+            df -h . | tail -2
+          } 2>&1 | tee logs/env.txt
+
+      - name: Write run summary
+        if: always()
+        shell: pwsh
+        run: |
+          "## Phase 1 result" | Out-File $env:GITHUB_STEP_SUMMARY
+          "- Configure (meson setup): ${{ steps.setup.outcome }}" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "- Compile (meson compile): ${{ steps.compile.outcome }}" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "- Logs are in the phase1-logs artifact" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-logs
+          path: logs/
+
+      - name: Upload built files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-build
+          path: out/
+          if-no-files-found: ignore
