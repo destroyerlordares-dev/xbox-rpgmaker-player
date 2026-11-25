@@ -1,1 +1,1 @@
-# xbox-rpgmaker-player
+# rpgmaker-player for xbox 
